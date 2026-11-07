@@ -1,0 +1,6 @@
+# Archivos temporales de Python
+__pycache__/
+*.py[cod]
+
+# Archivos de log
+logs/*.log

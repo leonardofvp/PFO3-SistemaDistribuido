@@ -1,74 +1,123 @@
 
-# ==================================================
-# IMPORTACIONES
-# ==================================================
-
-# Librería para establecer comunicaciones TCP/IP.
 import socket
+import json
 
-
-# ==================================================
-# CONFIGURACIÓN DEL CLIENTE
-# ==================================================
-
-# Dirección IP del servidor.
 HOST = '127.0.0.1'
-
-# Puerto donde escucha el servidor.
 PORT = 5000
 
 
-# ==================================================
-# CONEXIÓN CON EL SERVIDOR
-# ==================================================
+def recibir_respuesta(cliente, buffer):
+    """
+    Recibe la respuesta del servidor hasta encontrar un salto de linea.
+    """
 
-def conectar_servidor():
+    while b'\n' not in buffer:
+        datos = cliente.recv(1024)
 
-    # Creamos el socket del cliente utilizando IPv4 y TCP.
+        if not datos:
+            raise ConnectionError('El servidor cerro la conexion')
+
+        buffer += datos
+
+    respuesta, buffer = buffer.split(b'\n', 1)
+
+    return respuesta, buffer
+
+
+def enviar_tarea(cliente, buffer, tarea):
+    """
+    Envia una tarea al servidor y recibe su resultado.
+    """
+
+    mensaje = json.dumps(tarea) + '\n'
+
+    cliente.sendall(mensaje.encode('utf-8'))
+
+    datos, buffer = recibir_respuesta(cliente, buffer)
+
+    respuesta = json.loads(datos.decode('utf-8'))
+
+    print('\nResultado:', respuesta.get('resultado'))
+
+    return buffer
+
+
+def iniciar_cliente():
+
     cliente = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    try:
+    buffer = b''
 
-        # Establecemos la conexión con el servidor.
+    try:
         cliente.connect((HOST, PORT))
 
-        print("Conectado al servidor correctamente.")
+        print('Conectado al servidor')
 
-        # Solicitamos un mensaje al usuario.
-        mensaje = input("Ingrese un mensaje: ")
+        while True:
 
-        # Convertimos el mensaje a bytes y lo enviamos.
-        cliente.sendall(mensaje.encode('utf-8'))
+            print('\n========== MENU ==========')
+            print('1 - Sumar')
+            print('2 - Restar')
+            print('3 - Multiplicar')
+            print('4 - Dividir')
+            print('5 - Enviar mensaje de texto')
+            print('0 - Salir')
+            print('==========================')
 
-        # Esperamos recibir la respuesta del servidor.
-        respuesta = cliente.recv(1024)
+            opcion = input('Seleccione una opcion: ').strip()
 
-        # Mostramos la respuesta recibida.
-        print("Respuesta del servidor:", respuesta.decode('utf-8'))
+            if opcion == '0':
+                print('Desconectando cliente...')
+                break
+
+            # Operaciones matematicas
+            operaciones = {
+                '1': 'sumar',
+                '2': 'restar',
+                '3': 'multiplicar',
+                '4': 'dividir'
+            }
+
+            if opcion in operaciones:
+
+                try:
+                    numero1 = float(input('Ingrese el primer numero: '))
+                    numero2 = float(input('Ingrese el segundo numero: '))
+
+                except ValueError:
+                    print('Error: debe ingresar valores numericos')
+                    continue
+
+                tarea = {
+                    'operacion': operaciones[opcion],
+                    'numero1': numero1,
+                    'numero2': numero2
+                }
+
+            # Mensaje de texto
+            elif opcion == '5':
+
+                mensaje = input('Ingrese el mensaje: ')
+
+                tarea = {
+                    'mensaje': mensaje
+                }
+
+            else:
+                print('Opcion incorrecta')
+                continue
+
+            buffer = enviar_tarea(cliente, buffer, tarea)
 
     except ConnectionRefusedError:
+        print('No se pudo conectar. Verifique que el servidor este iniciado')
 
-        # Se ejecuta cuando el servidor no está disponible.
-        print("No se pudo conectar con el servidor.")
-
-    except Exception as e:
-
-        # Capturamos otros errores de comunicación.
-        print(f"Error de comunicación: {e}")
+    except (ConnectionError, OSError) as error:
+        print(f'Error de comunicacion: {error}')
 
     finally:
-
-        # Cerramos el socket del cliente.
         cliente.close()
 
-        print("Conexión del cliente cerrada.")
 
-
-# ==================================================
-# PUNTO DE ENTRADA DEL PROGRAMA
-# ==================================================
-
-if __name__ == "__main__":
-
-    # Iniciamos la conexión con el servidor.
-    conectar_servidor()
+if __name__ == '__main__':
+    iniciar_cliente()

@@ -2,46 +2,97 @@
 import socket
 import json
 import threading
-
 from concurrent.futures import ThreadPoolExecutor
 from logger import obtener_logger
 
-
 HOST = '127.0.0.1'
 PORT = 5000
-MAX_WORKERS = 5
-MAX_MENSAJE = 65536
+
+# Pool de 5 workers para procesar las tareas
+pool = ThreadPoolExecutor(max_workers=5)
 
 logger = obtener_logger()
 
 
 def procesar_tarea(tarea):
+    """
+    Procesa mensajes de texto y operaciones matemáticas.
+    Esta función se ejecuta en uno de los workers del pool.
+    """
 
-    mensaje = tarea.get('mensaje')
+    try:
+        operacion = tarea.get('operacion')
 
-    if not isinstance(mensaje, str) or not mensaje.strip():
+        # Operaciones matemáticas
+        if operacion in ('sumar', 'restar', 'multiplicar', 'dividir'):
+
+            numero1 = float(tarea.get('numero1'))
+            numero2 = float(tarea.get('numero2'))
+
+            if operacion == 'sumar':
+                resultado = numero1 + numero2
+
+            elif operacion == 'restar':
+                resultado = numero1 - numero2
+
+            elif operacion == 'multiplicar':
+                resultado = numero1 * numero2
+
+            elif operacion == 'dividir':
+                if numero2 == 0:
+                    raise ValueError('No se puede dividir por cero')
+
+                resultado = numero1 / numero2
+
+            logger.info(
+                f'Operacion: {operacion} | '
+                f'{numero1} y {numero2} | Resultado: {resultado}'
+            )
+
+            return {
+                'estado': 'OK',
+                'resultado': resultado
+            }
+
+        # Mensaje de texto
+        mensaje = tarea.get('mensaje')
+
+        if mensaje is not None:
+            if not isinstance(mensaje, str) or not mensaje.strip():
+                raise ValueError('El mensaje no puede estar vacio')
+
+            logger.info(f'Mensaje recibido: {mensaje}')
+
+            return {
+                'estado': 'OK',
+                'resultado': f'Tarea procesada correctamente: {mensaje}'
+            }
+
+        raise ValueError('La tarea no contiene una operacion valida')
+
+    except (ValueError, TypeError) as error:
+        logger.error(f'Error al procesar tarea: {error}')
+
         return {
             'estado': 'ERROR',
-            'resultado': 'El mensaje no puede estar vacío.'
+            'resultado': str(error)
         }
 
-    mensaje = mensaje.strip()
+    except Exception as error:
+        logger.exception(f'Error inesperado: {error}')
 
-    logger.info(
-        f'Worker {threading.current_thread().name} '
-        f'procesando tarea: {mensaje}'
-    )
-
-    return {
-        'estado': 'OK',
-        'resultado': f'Tarea procesada correctamente: {mensaje}'
-    }
+        return {
+            'estado': 'ERROR',
+            'resultado': 'Error interno al procesar la tarea'
+        }
 
 
 def recibir_mensaje(cliente, buffer):
+    """
+    Recibe datos hasta encontrar un salto de linea.
+    """
 
     while b'\n' not in buffer:
-
         datos = cliente.recv(1024)
 
         if not datos:
@@ -49,132 +100,95 @@ def recibir_mensaje(cliente, buffer):
 
         buffer += datos
 
-        if len(buffer) > MAX_MENSAJE:
-            raise ValueError('Mensaje demasiado grande.')
+    mensaje, buffer = buffer.split(b'\n', 1)
 
-    mensaje_bytes, buffer = buffer.split(b'\n', 1)
-
-    if not mensaje_bytes.strip():
-        raise ValueError('Mensaje vacío.')
-
-    solicitud = json.loads(mensaje_bytes.decode('utf-8'))
-
-    return solicitud, buffer
+    return mensaje, buffer
 
 
-def manejar_cliente(cliente, direccion, pool):
+def manejar_cliente(cliente, direccion):
+    """
+    Atiende las solicitudes de un cliente.
+    """
 
     logger.info(f'Cliente conectado: {direccion}')
 
     buffer = b''
 
     try:
-
         while True:
 
-            solicitud, buffer = recibir_mensaje(cliente, buffer)
+            datos, buffer = recibir_mensaje(cliente, buffer)
 
-            if solicitud is None:
+            if datos is None:
                 break
 
-            if not isinstance(solicitud, dict):
-                raise ValueError('La solicitud debe ser un objeto JSON.')
-
-            logger.info(f'Solicitud recibida: {direccion}')
-
             try:
+                tarea = json.loads(datos.decode('utf-8'))
 
-                futuro = pool.submit(procesar_tarea, solicitud)
-                resultado = futuro.result()
+                # Enviar la tarea al pool de workers
+                futuro = pool.submit(procesar_tarea, tarea)
 
-            except Exception as error:
+                # Esperar el resultado del worker
+                respuesta = futuro.result()
 
-                logger.exception(f'Error procesando tarea: {error}')
-
-                resultado = {
+            except json.JSONDecodeError:
+                respuesta = {
                     'estado': 'ERROR',
-                    'resultado': 'Error al procesar la tarea.'
+                    'resultado': 'Formato JSON invalido'
                 }
 
-            respuesta = json.dumps(
-                resultado,
-                ensure_ascii=False
-            ) + '\n'
+                logger.error('Se recibio un JSON invalido')
 
-            cliente.sendall(respuesta.encode('utf-8'))
+            except Exception as error:
+                respuesta = {
+                    'estado': 'ERROR',
+                    'resultado': str(error)
+                }
 
-            logger.info(f'Respuesta enviada: {direccion}')
+                logger.error(f'Error de comunicacion: {error}')
 
-    except json.JSONDecodeError as error:
+            # Enviar respuesta al cliente
+            respuesta_json = json.dumps(respuesta) + '\n'
 
-        logger.exception(f'JSON inválido: {error}')
+            cliente.sendall(respuesta_json.encode('utf-8'))
 
-    except ValueError as error:
-
-        logger.exception(f'Error de solicitud: {error}')
-
-    except ConnectionError as error:
-
-        logger.info(f'Conexión finalizada: {direccion} - {error}')
-
-    except OSError as error:
-
-        logger.exception(f'Error de socket: {error}')
-
-    except Exception as error:
-
-        logger.exception(f'Error inesperado: {error}')
+    except (ConnectionError, OSError) as error:
+        logger.error(f'Error de conexion con {direccion}: {error}')
 
     finally:
-
         cliente.close()
-        logger.info(f'Conexión cerrada: {direccion}')
+        logger.info(f'Cliente desconectado: {direccion}')
 
 
 def iniciar_servidor():
 
     servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    servidor.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_REUSEADDR,
-        1
-    )
+    servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    servidor.bind((HOST, PORT))
+    servidor.listen()
+
+    logger.info(f'Servidor escuchando en {HOST}:{PORT}')
 
     try:
+        while True:
 
-        servidor.bind((HOST, PORT))
-        servidor.listen(10)
+            cliente, direccion = servidor.accept()
 
-        logger.info(f'Servidor escuchando en {HOST}:{PORT}')
-        logger.info(f'Pool de workers configurado: {MAX_WORKERS}')
+            hilo = threading.Thread(
+                target=manejar_cliente,
+                args=(cliente, direccion)
+            )
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-
-            while True:
-
-                cliente, direccion = servidor.accept()
-
-                hilo = threading.Thread(
-                    target=manejar_cliente,
-                    args=(cliente, direccion, pool),
-                    daemon=True
-                )
-
-                hilo.start()
+            hilo.start()
 
     except KeyboardInterrupt:
-
-        logger.info('Servidor detenido por el usuario.')
-
-    except OSError as error:
-
-        logger.exception(f'Error en el servidor: {error}')
+        logger.info('Servidor detenido por el usuario')
 
     finally:
-
         servidor.close()
-        logger.info('Socket del servidor cerrado.')
+        pool.shutdown(wait=True)
 
 
 if __name__ == '__main__':
