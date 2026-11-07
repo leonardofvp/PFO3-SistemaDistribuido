@@ -1,172 +1,181 @@
 
-# ==================================================
-# IMPORTACIONES
-# ==================================================
-
-# Permite establecer comunicaciones mediante TCP/IP.
 import socket
+import json
+import threading
 
-# Administra un conjunto de hilos reutilizables.
 from concurrent.futures import ThreadPoolExecutor
-
-# Importamos la función para registrar eventos.
 from logger import obtener_logger
 
 
-# ==================================================
-# CONFIGURACIÓN DEL SERVIDOR
-# ==================================================
-
-# Dirección IP donde escuchará el servidor.
 HOST = '127.0.0.1'
-
-# Puerto TCP utilizado para recibir conexiones.
 PORT = 5000
-
-# Cantidad máxima de hilos que atenderán clientes simultáneamente.
 MAX_WORKERS = 5
+MAX_MENSAJE = 65536
 
-# Tiempo máximo de espera para recibir datos de un cliente.
-# Si pasan 30 segundos sin recibir información, se cierra la conexión.
-TIMEOUT_CLIENTE = 30
-
-# Inicializamos el sistema de logs.
 logger = obtener_logger()
 
 
-# ==================================================
-# ATENCIÓN DE CLIENTES
-# ==================================================
+def procesar_tarea(tarea):
 
-def manejar_cliente(cliente, direccion):
-    """
-    Atiende las solicitudes de un cliente.
+    mensaje = tarea.get('mensaje')
 
-    cliente: socket de comunicación con el cliente.
-    direccion: dirección IP y puerto del cliente.
+    if not isinstance(mensaje, str) or not mensaje.strip():
+        return {
+            'estado': 'ERROR',
+            'resultado': 'El mensaje no puede estar vacío.'
+        }
 
-    Esta función se ejecuta dentro de un worker del Thread Pool.
-    """
+    mensaje = mensaje.strip()
 
-    logger.info(f"Nueva conexión desde: {direccion}")
+    logger.info(
+        f'Worker {threading.current_thread().name} '
+        f'procesando tarea: {mensaje}'
+    )
 
-    try:
+    return {
+        'estado': 'OK',
+        'resultado': f'Tarea procesada correctamente: {mensaje}'
+    }
 
-        # Establecemos el tiempo máximo de espera del socket.
-        cliente.settimeout(TIMEOUT_CLIENTE)
 
-        # Esperamos recibir información del cliente.
+def recibir_mensaje(cliente, buffer):
+
+    while b'\n' not in buffer:
+
         datos = cliente.recv(1024)
 
-        # Verificamos que se hayan recibido datos.
-        if datos:
+        if not datos:
+            return None, buffer
 
-            # Convertimos los bytes recibidos a texto.
-            mensaje = datos.decode('utf-8')
+        buffer += datos
 
-            # Registramos el mensaje recibido.
-            logger.info(f"Mensaje recibido: {mensaje}")
+        if len(buffer) > MAX_MENSAJE:
+            raise ValueError('Mensaje demasiado grande.')
 
-            # Generamos una respuesta para el cliente.
-            respuesta = "Mensaje procesado por un worker"
+    mensaje_bytes, buffer = buffer.split(b'\n', 1)
 
-            # Enviamos la respuesta mediante el socket.
-            cliente.sendall(respuesta.encode('utf-8'))
+    if not mensaje_bytes.strip():
+        raise ValueError('Mensaje vacío.')
 
-        else:
+    solicitud = json.loads(mensaje_bytes.decode('utf-8'))
 
-            # El cliente cerró la conexión sin enviar información.
-            logger.info(f"El cliente {direccion} cerró la conexión.")
-
-    except socket.timeout:
-
-        # Se ejecuta cuando el cliente supera el tiempo de espera.
-        logger.warning(
-            f"Timeout: cliente {direccion} inactivo durante "
-            f"{TIMEOUT_CLIENTE} segundos."
-        )
-
-    except Exception as e:
-
-        # Registramos cualquier otro error de comunicación.
-        logger.error(f"Error con el cliente {direccion}: {e}")
-
-    finally:
-
-        # Cerramos la conexión para liberar recursos.
-        cliente.close()
-
-        # Registramos el cierre de la conexión.
-        logger.info(f"Conexión cerrada: {direccion}")
+    return solicitud, buffer
 
 
-# ==================================================
-# INICIO DEL SERVIDOR
-# ==================================================
+def manejar_cliente(cliente, direccion, pool):
 
-def iniciar_servidor():
+    logger.info(f'Cliente conectado: {direccion}')
 
-    # Creamos un socket IPv4 utilizando TCP.
-    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Permitimos reutilizar el puerto después de detener el servidor.
-    servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    buffer = b''
 
     try:
 
-        # Asociamos el socket a la dirección IP y al puerto.
-        servidor.bind((HOST, PORT))
+        while True:
 
-        # Colocamos el servidor en modo escucha.
-        servidor.listen(10)
+            solicitud, buffer = recibir_mensaje(cliente, buffer)
 
-        logger.info(f"Servidor escuchando en {HOST}:{PORT}")
-        logger.info(f"Thread Pool configurado con {MAX_WORKERS} workers")
-        logger.info(f"Timeout de clientes: {TIMEOUT_CLIENTE} segundos")
+            if solicitud is None:
+                break
 
-        # Creamos el Thread Pool.
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            if not isinstance(solicitud, dict):
+                raise ValueError('La solicitud debe ser un objeto JSON.')
+
+            logger.info(f'Solicitud recibida: {direccion}')
 
             try:
 
-                # El servidor permanece esperando conexiones.
-                while True:
+                futuro = pool.submit(procesar_tarea, solicitud)
+                resultado = futuro.result()
 
-                    # Esperamos la conexión de un cliente.
-                    cliente, direccion = servidor.accept()
+            except Exception as error:
 
-                    # Delegamos la atención al Thread Pool.
-                    pool.submit(manejar_cliente, cliente, direccion)
+                logger.exception(f'Error procesando tarea: {error}')
 
-            except KeyboardInterrupt:
+                resultado = {
+                    'estado': 'ERROR',
+                    'resultado': 'Error al procesar la tarea.'
+                }
 
-                # Capturamos la interrupción mediante Ctrl + C.
-                logger.info("Solicitud de detención recibida (Ctrl + C).")
+            respuesta = json.dumps(
+                resultado,
+                ensure_ascii=False
+            ) + '\n'
 
-            finally:
+            cliente.sendall(respuesta.encode('utf-8'))
 
-                # Cerramos el socket principal.
-                servidor.close()
-                logger.info("Socket del servidor cerrado.")
+            logger.info(f'Respuesta enviada: {direccion}')
 
-        # Esperamos que finalicen los workers activos.
-        logger.info("Todos los workers finalizaron.")
-        logger.info("Servidor detenido correctamente.")
+    except json.JSONDecodeError as error:
 
-    except OSError as e:
+        logger.exception(f'JSON inválido: {error}')
 
-        # Registramos errores relacionados con el socket.
-        logger.error(f"Error al iniciar o ejecutar el servidor: {e}")
+    except ValueError as error:
 
-        # Cerramos el socket.
+        logger.exception(f'Error de solicitud: {error}')
+
+    except ConnectionError as error:
+
+        logger.info(f'Conexión finalizada: {direccion} - {error}')
+
+    except OSError as error:
+
+        logger.exception(f'Error de socket: {error}')
+
+    except Exception as error:
+
+        logger.exception(f'Error inesperado: {error}')
+
+    finally:
+
+        cliente.close()
+        logger.info(f'Conexión cerrada: {direccion}')
+
+
+def iniciar_servidor():
+
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    servidor.setsockopt(
+        socket.SOL_SOCKET,
+        socket.SO_REUSEADDR,
+        1
+    )
+
+    try:
+
+        servidor.bind((HOST, PORT))
+        servidor.listen(10)
+
+        logger.info(f'Servidor escuchando en {HOST}:{PORT}')
+        logger.info(f'Pool de workers configurado: {MAX_WORKERS}')
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+
+            while True:
+
+                cliente, direccion = servidor.accept()
+
+                hilo = threading.Thread(
+                    target=manejar_cliente,
+                    args=(cliente, direccion, pool),
+                    daemon=True
+                )
+
+                hilo.start()
+
+    except KeyboardInterrupt:
+
+        logger.info('Servidor detenido por el usuario.')
+
+    except OSError as error:
+
+        logger.exception(f'Error en el servidor: {error}')
+
+    finally:
+
         servidor.close()
+        logger.info('Socket del servidor cerrado.')
 
 
-# ==================================================
-# PUNTO DE ENTRADA DEL PROGRAMA
-# ==================================================
-
-if __name__ == "__main__":
-
-    # Iniciamos el servidor.
+if __name__ == '__main__':
     iniciar_servidor()
